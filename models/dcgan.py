@@ -27,16 +27,58 @@ from pytorch_lightning.callbacks import ModelCheckpoint
 import wandb
 
 
+class ResidualConvBlock(nn.Module):
+    def __init__(self, n_channels, kernel_size=3, padding=1, stride=1, bias=True):
+        super().__init__()
+        self.conv = nn.Conv2d(n_channels, n_channels, kernel_size, padding=padding, stride=stride, bias=bias)
+        self.bn = nn.BatchNorm2d(n_channels)
+        self.relu = nn.LeakyReLU(0.2, inplace=True)
+    
+    def forward(self, x):
+        out = self.relu(self.bn(self.conv(x)))
+        return out + x
+
+
 class Generator(nn.Module):
-    def __init__(self, latent_dim, img_shape, n_channels=4, n_feats=128, kernel_size=3):
+    def __init__(self, latent_dim, img_shape, n_feats=128, kernel_size=3):
         super().__init__()
         self.img_shape = img_shape
 
-        self.init_size = img_shape[1] // 4
+        self.init_size = img_shape[1] // 8
         self.l1 = nn.Sequential(nn.Linear(latent_dim, n_feats * self.init_size ** 2))
 
         self.n_feats = n_feats
-
+        # medium:
+        self.conv_blocks = nn.Sequential(
+            nn.BatchNorm2d(n_feats),
+            nn.Upsample(scale_factor=2),
+            ResidualConvBlock(n_feats, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats, kernel_size, padding=1, stride=1),
+            nn.Upsample(scale_factor=2),
+            ResidualConvBlock(n_feats, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats, kernel_size, padding=1, stride=1),
+            nn.Upsample(scale_factor=2),
+            ResidualConvBlock(n_feats, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats, kernel_size, padding=1, stride=1),
+            nn.Conv2d(n_feats, n_feats//2, 3, stride=1, padding=1),
+            nn.BatchNorm2d(n_feats//2, 0.8),
+            nn.LeakyReLU(0.2, inplace=True),
+            ResidualConvBlock(n_feats//2, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats//2, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats//2, kernel_size, padding=1, stride=1),
+            nn.Conv2d(n_feats//2, n_feats//2, 3, stride=1, padding=1),
+            nn.BatchNorm2d(n_feats//2, 0.8),
+            nn.LeakyReLU(0.2, inplace=True),
+            nn.Conv2d(n_feats//2, img_shape[0], 3, stride=1, padding=1),
+            nn.Tanh(),
+        )
+        # small:
+        """
         self.conv_blocks = nn.Sequential(
             nn.BatchNorm2d(n_feats),
             nn.Upsample(scale_factor=2),
@@ -50,7 +92,7 @@ class Generator(nn.Module):
             nn.Conv2d(n_feats//2, img_shape[0], 3, stride=1, padding=1),
             nn.Tanh(),
         )
-
+        """
     def forward(self, z):
         out = self.l1(z)
         out = out.view(out.shape[0], self.n_feats, self.init_size, self.init_size)
@@ -91,6 +133,7 @@ class DCGAN(LightningModule):
 
     def __init__(self,
                  latent_dim: int = 100,
+                 n_feats: int = 128,
                  lr: float = 0.0002,
                  b1: float = 0.5,
                  b2: float = 0.999,
@@ -103,6 +146,7 @@ class DCGAN(LightningModule):
         super().__init__()
         self.save_hyperparameters()
 
+        self.n_feats = n_feats
         self.latent_dim = latent_dim
         self.lr = lr
         self.b1 = b1
@@ -117,8 +161,8 @@ class DCGAN(LightningModule):
 
         # networks
         img_shape = (4, 64, 64)
-        self.generator = Generator(latent_dim=self.latent_dim, img_shape=img_shape)
-        self.discriminator = Discriminator(img_shape=img_shape)
+        self.generator = Generator(latent_dim=self.latent_dim, img_shape=img_shape, n_feats=self.n_feats)
+        self.discriminator = Discriminator(img_shape=img_shape, n_feats=self.n_feats)
 
         self.validation_z = torch.randn(8, self.latent_dim)
 
@@ -280,6 +324,7 @@ if __name__ == '__main__':
     parser = ArgumentParser()
     parser.add_argument("--accelerator", type=str, default="auto", help="auto, dp, ddp, ddp2, ddp_spawn, ddp_cpu, etc.")
     parser.add_argument("--batch_size", type=int, default=256, help="size of the batches")
+    parser.add_argument("--n_feats", type=int, default=128, help="number of feature maps")
     parser.add_argument("--lr", type=float, default=0.0002, help="adam: learning rate")
     parser.add_argument("--b1", type=float, default=0.5,
                         help="adam: decay of first order momentum of gradient")
@@ -294,7 +339,7 @@ if __name__ == '__main__':
     parser.add_argument("--n_generator_steps_per_discriminator_step", type=int, default=2)
     parser.add_argument("--discriminator_grad_clipping", type=int, default=5)
     parser.add_argument("--log_every_n_steps", type=int, default=100)
-    parser.add_argument("--checkpoint_every_n_examples", type=int, default=1000)
+    parser.add_argument("--checkpoint_every_n_examples", type=int, default=1000000)
 
 
     hparams = parser.parse_args()
