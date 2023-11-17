@@ -6,7 +6,7 @@
 #SBATCH --cpus-per-task=12
 #SBATCH --time=48:00:00
 #SBATCH --partition=g40x
-#SBATCH --job-name=latentclip-vitb8
+#SBATCH --job-name=dcgan
 #SBATCH --output=logs/dcgan-%j.out
 #SBATCH --error=logs/dcgan-%j.err
 #SBATCH --exclusive
