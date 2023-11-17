@@ -254,7 +254,7 @@ def main(args: Namespace) -> None:
         verbose=True,  # If you want to see a message for each checkpoint
         monitor='D(x)',  # Quantity to monitor
         mode='min',  # Mode of the monitored quantity
-        every_n_train_steps=1000000//args.batch_size,
+        every_n_train_steps=args.checkpoint_every_n_examples//args.batch_size,
     )
 
     # ------------------------
@@ -294,6 +294,7 @@ if __name__ == '__main__':
     parser.add_argument("--n_generator_steps_per_discriminator_step", type=int, default=2)
     parser.add_argument("--discriminator_grad_clipping", type=int, default=5)
     parser.add_argument("--log_every_n_steps", type=int, default=100)
+    parser.add_argument("--checkpoint_every_n_examples", type=int, default=1000)
 
 
     hparams = parser.parse_args()
