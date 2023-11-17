@@ -97,6 +97,8 @@ class DCGAN(LightningModule):
                  batch_size: int = 64, 
                  num_workers: int = 0,
                  n_generator_steps_per_discriminator_step: int = 2,
+                 discriminator_grad_clipping: int = 5,
+                 log_every_n_steps: int = 100,
                  **kwargs):
         super().__init__()
         self.save_hyperparameters()
@@ -108,6 +110,9 @@ class DCGAN(LightningModule):
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.n_generator_steps_per_discriminator_steps = n_generator_steps_per_discriminator_step
+        self.discriminator_grad_clipping = discriminator_grad_clipping
+        self.log_every_n_steps = log_every_n_steps
+
         self.automatic_optimization = False
 
         # networks
@@ -140,16 +145,18 @@ class DCGAN(LightningModule):
             self.generated_imgs = self(z)
 
             # log sampled images
-            sample_imgs = self.generated_imgs[:6]
+            sample_imgs = self.generated_imgs[:16]
             grid = torchvision.utils.make_grid(sample_imgs)
-            self.logger.experiment.log({'generated_images': [wandb.Image(grid, caption='Generated Images')]})
+            if self.global_step % self.log_every_n_steps == 0:
+                self.logger.experiment.log({'generated_images': [wandb.Image(grid, caption='Generated Images')]})
             # ground truth result (ie: all fake)
             # put on GPU because we created this tensor inside training_loop
             valid = torch.ones(imgs.size(0), 1)
             valid = valid.type_as(imgs)
 
             # adversarial loss is binary cross-entropy
-            g_loss = self.adversarial_loss(self.discriminator(self(z)), valid)
+            D_G_z1 = self.discriminator(self.generated_imgs)
+            g_loss = self.adversarial_loss(D_G_z1, valid)
             g_loss.backward()
             optG.step()
             tqdm_dict = {'g_loss': g_loss}
@@ -166,7 +173,8 @@ class DCGAN(LightningModule):
         valid = torch.ones(imgs.size(0), 1)
         valid = valid.type_as(imgs)
 
-        real_loss = self.adversarial_loss(self.discriminator(imgs), valid)
+        D_x = self.discriminator(imgs)
+        real_loss = self.adversarial_loss(D_x, valid)
 
         # how well can it label as fake?
         fake = torch.zeros(imgs.size(0), 1)
@@ -178,6 +186,8 @@ class DCGAN(LightningModule):
         # discriminator loss is the average of these
         d_loss = (real_loss + fake_loss) / 2
         d_loss.backward()
+        if self.discriminator_grad_clipping > 0:
+            torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), self.discriminator_grad_clipping)
         optD.step()
         tqdm_dict = {'d_loss': d_loss}
         output = OrderedDict({
@@ -185,6 +195,15 @@ class DCGAN(LightningModule):
             'progress_bar': tqdm_dict,
             'log': tqdm_dict
         })
+
+        self.log('epoch', self.current_epoch, on_step=True, on_epoch=True)
+        self.log('loss_D', d_loss.item(), on_step=True, on_epoch=True)
+        self.log('loss_G', g_loss.item(), on_step=True, on_epoch=True)
+        self.log('D(x)', D_x.mean(), on_step=True, on_epoch=True)
+        self.log('D(G(z))', D_G_z1.mean(), on_step=True, on_epoch=True)
+        self.log('grad_norm_D', torch.nn.utils.clip_grad_norm_(self.discriminator.parameters(), 1), on_step=True, on_epoch=True)
+        self.log('grad_norm_G', torch.nn.utils.clip_grad_norm_(self.generator.parameters(), 1), on_step=True, on_epoch=True)
+
         return output
 
     def configure_optimizers(self):
@@ -233,7 +252,7 @@ def main(args: Namespace) -> None:
         dirpath=os.path.join(args.checkpoint_path, run_name),  # Define the path where checkpoints will be saved
         save_top_k=-1,  # Set to -1 to save all epochs
         verbose=True,  # If you want to see a message for each checkpoint
-        monitor='val_loss',  # Quantity to monitor
+        monitor='D(x)',  # Quantity to monitor
         mode='min',  # Mode of the monitored quantity
         every_n_train_steps=1000000//args.batch_size,
     )
@@ -273,6 +292,8 @@ if __name__ == '__main__':
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--max_epochs", type=int, default=10, help="number of epochs of training")
     parser.add_argument("--n_generator_steps_per_discriminator_step", type=int, default=2)
+    parser.add_argument("--discriminator_grad_clipping", type=int, default=5)
+    parser.add_argument("--log_every_n_steps", type=int, default=100)
 
 
     hparams = parser.parse_args()
