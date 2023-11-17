@@ -129,7 +129,7 @@ class Discriminator(nn.Module):
 
         # The height and width of downsampled image
         ds_size = img_shape[1] // 2 ** 4
-        self.adv_layer = nn.Sequential(nn.Linear(128 * ds_size ** 2, 1), nn.Sigmoid())
+        self.adv_layer = nn.Sequential(nn.Linear(n_feats * ds_size ** 2, 1), nn.Sigmoid())
 
     def forward(self, img):
         out = self.model(img)
@@ -152,10 +152,12 @@ class DCGAN(LightningModule):
                  n_generator_steps_per_discriminator_step: int = 2,
                  discriminator_grad_clipping: int = 5,
                  log_every_n_steps: int = 100,
+                 url: str = None,
                  **kwargs):
         super().__init__()
         self.save_hyperparameters()
 
+        self.url = url
         self.n_feats = n_feats
         self.latent_dim = latent_dim
         self.lr = lr
@@ -275,7 +277,7 @@ class DCGAN(LightningModule):
         
         rescale = torch.nn.Tanh()
 
-        dataset = wds.WebDataset('../../data/latents/{000000..000007}.tar')
+        dataset = wds.WebDataset(self.url)
         dataset = dataset.rename(image="latent.pt")
         dataset = dataset.map_dict(image=load_latent)
         dataset = dataset.map_dict(image=rescale)
@@ -350,6 +352,7 @@ if __name__ == '__main__':
     parser.add_argument("--discriminator_grad_clipping", type=int, default=5)
     parser.add_argument("--log_every_n_steps", type=int, default=100)
     parser.add_argument("--checkpoint_every_n_examples", type=int, default=1000000)
+    parser.add_argument("--url", type=str, default='../../data/latents/{000000..000007}.tar')
 
 
     hparams = parser.parse_args()
