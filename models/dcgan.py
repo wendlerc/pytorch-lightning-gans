@@ -101,20 +101,30 @@ class Generator(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, img_shape):
+    def __init__(self, img_shape, n_feats=128, kernel_size=3):
         super(Discriminator, self).__init__()
 
-        def discriminator_block(in_feat, out_feat, bn=True):
+        def discriminator_block(in_feat, out_feat):
+            block = []
+            block += 2*[ResidualConvBlock(in_feat, kernel_size, padding=1, stride=1)]
+            block += [nn.Conv2d(in_feat, out_feat, kernel_size, 2, 1), 
+                      nn.LeakyReLU(0.2, inplace=True),  
+                      nn.BatchNorm2d(out_feat, 0.8)]
+            block += [ResidualConvBlock(out_feat, kernel_size, padding=1, stride=1)]
+            block += [nn.Dropout2d(0.25)]
+            
+            """ small block 
             block = [nn.Conv2d(in_feat, out_feat, 3, 2, 1), nn.LeakyReLU(0.2, inplace=True), nn.Dropout2d(0.25)]
             if bn:
                 block.append(nn.BatchNorm2d(out_feat, 0.8))
+            """
             return block
 
         self.model = nn.Sequential(
-            *discriminator_block(img_shape[0], 16, bn=False),
-            *discriminator_block(16, 32),
-            *discriminator_block(32, 64),
-            *discriminator_block(64, 128),
+            *discriminator_block(img_shape[0], n_feats//8),
+            *discriminator_block(n_feats//8, n_feats//4),
+            *discriminator_block(n_feats//4, n_feats//2),
+            *discriminator_block(n_feats//2, n_feats),
         )
 
         # The height and width of downsampled image
