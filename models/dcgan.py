@@ -5,6 +5,7 @@ After a few epochs, launch TensorBoard to see the images being generated at ever
 tensorboard --logdir default
 """
 import os
+import io
 from argparse import ArgumentParser, Namespace
 from collections import OrderedDict
 
@@ -16,36 +17,43 @@ import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 from torchvision.datasets import MNIST
+import webdataset as wds
 
 from pytorch_lightning.core import LightningModule
 from pytorch_lightning.trainer import Trainer
+from pytorch_lightning.loggers import WandbLogger
+from pytorch_lightning.callbacks import ModelCheckpoint
+
+import wandb
 
 
 class Generator(nn.Module):
-    def __init__(self, latent_dim, img_shape):
+    def __init__(self, latent_dim, img_shape, n_channels=4, n_feats=128, kernel_size=3):
         super().__init__()
         self.img_shape = img_shape
 
         self.init_size = img_shape[1] // 4
-        self.l1 = nn.Sequential(nn.Linear(latent_dim, 128 * self.init_size ** 2))
+        self.l1 = nn.Sequential(nn.Linear(latent_dim, n_feats * self.init_size ** 2))
+
+        self.n_feats = n_feats
 
         self.conv_blocks = nn.Sequential(
-            nn.BatchNorm2d(128),
+            nn.BatchNorm2d(n_feats),
             nn.Upsample(scale_factor=2),
-            nn.Conv2d(128, 128, 3, stride=1, padding=1),
-            nn.BatchNorm2d(128, 0.8),
+            nn.Conv2d(n_feats, n_feats, kernel_size, stride=1, padding=1),
+            nn.BatchNorm2d(n_feats, 0.8),
             nn.LeakyReLU(0.2, inplace=True),
             nn.Upsample(scale_factor=2),
-            nn.Conv2d(128, 64, 3, stride=1, padding=1),
-            nn.BatchNorm2d(64, 0.8),
+            nn.Conv2d(n_feats, n_feats//2, 3, stride=1, padding=1),
+            nn.BatchNorm2d(n_feats//2, 0.8),
             nn.LeakyReLU(0.2, inplace=True),
-            nn.Conv2d(64, img_shape[0], 3, stride=1, padding=1),
+            nn.Conv2d(n_feats//2, img_shape[0], 3, stride=1, padding=1),
             nn.Tanh(),
         )
 
     def forward(self, z):
         out = self.l1(z)
-        out = out.view(out.shape[0], 128, self.init_size, self.init_size)
+        out = out.view(out.shape[0], self.n_feats, self.init_size, self.init_size)
         img = self.conv_blocks(out)
         return img
 
@@ -86,7 +94,10 @@ class DCGAN(LightningModule):
                  lr: float = 0.0002,
                  b1: float = 0.5,
                  b2: float = 0.999,
-                 batch_size: int = 64, **kwargs):
+                 batch_size: int = 64, 
+                 num_workers: int = 0,
+                 n_generator_steps_per_discriminator_step: int = 2,
+                 **kwargs):
         super().__init__()
         self.save_hyperparameters()
 
@@ -95,9 +106,12 @@ class DCGAN(LightningModule):
         self.b1 = b1
         self.b2 = b2
         self.batch_size = batch_size
+        self.num_workers = num_workers
+        self.n_generator_steps_per_discriminator_steps = n_generator_steps_per_discriminator_step
+        self.automatic_optimization = False
 
         # networks
-        img_shape = (1, 32, 32)
+        img_shape = (4, 64, 64)
         self.generator = Generator(latent_dim=self.latent_dim, img_shape=img_shape)
         self.discriminator = Discriminator(img_shape=img_shape)
 
@@ -111,24 +125,24 @@ class DCGAN(LightningModule):
     def adversarial_loss(self, y_hat, y):
         return F.binary_cross_entropy(y_hat, y)
 
-    def training_step(self, batch, batch_idx, optimizer_idx):
-        imgs, _ = batch
+    def training_step(self, batch, batch_idx):
+        optG, optD = self.optimizers()
+        imgs, = batch
 
         # sample noise
         z = torch.randn(imgs.shape[0], self.latent_dim)
         z = z.type_as(imgs)
 
         # train generator
-        if optimizer_idx == 0:
-
+        for _ in range(self.n_generator_steps_per_discriminator_steps):
+            optG.zero_grad()
             # generate images
             self.generated_imgs = self(z)
 
             # log sampled images
             sample_imgs = self.generated_imgs[:6]
             grid = torchvision.utils.make_grid(sample_imgs)
-            self.logger.experiment.add_image('generated_images', grid, 0)
-
+            self.logger.experiment.log({'generated_images': [wandb.Image(grid, caption='Generated Images')]})
             # ground truth result (ie: all fake)
             # put on GPU because we created this tensor inside training_loop
             valid = torch.ones(imgs.size(0), 1)
@@ -136,40 +150,42 @@ class DCGAN(LightningModule):
 
             # adversarial loss is binary cross-entropy
             g_loss = self.adversarial_loss(self.discriminator(self(z)), valid)
+            g_loss.backward()
+            optG.step()
             tqdm_dict = {'g_loss': g_loss}
             output = OrderedDict({
                 'loss': g_loss,
                 'progress_bar': tqdm_dict,
                 'log': tqdm_dict
             })
-            return output
 
         # train discriminator
-        if optimizer_idx == 1:
-            # Measure discriminator's ability to classify real from generated samples
+        # Measure discriminator's ability to classify real from generated samples
+        optD.zero_grad()
+        # how well can it label as real?
+        valid = torch.ones(imgs.size(0), 1)
+        valid = valid.type_as(imgs)
 
-            # how well can it label as real?
-            valid = torch.ones(imgs.size(0), 1)
-            valid = valid.type_as(imgs)
+        real_loss = self.adversarial_loss(self.discriminator(imgs), valid)
 
-            real_loss = self.adversarial_loss(self.discriminator(imgs), valid)
+        # how well can it label as fake?
+        fake = torch.zeros(imgs.size(0), 1)
+        fake = fake.type_as(imgs)
 
-            # how well can it label as fake?
-            fake = torch.zeros(imgs.size(0), 1)
-            fake = fake.type_as(imgs)
+        fake_loss = self.adversarial_loss(
+            self.discriminator(self(z).detach()), fake)
 
-            fake_loss = self.adversarial_loss(
-                self.discriminator(self(z).detach()), fake)
-
-            # discriminator loss is the average of these
-            d_loss = (real_loss + fake_loss) / 2
-            tqdm_dict = {'d_loss': d_loss}
-            output = OrderedDict({
-                'loss': d_loss,
-                'progress_bar': tqdm_dict,
-                'log': tqdm_dict
-            })
-            return output
+        # discriminator loss is the average of these
+        d_loss = (real_loss + fake_loss) / 2
+        d_loss.backward()
+        optD.step()
+        tqdm_dict = {'d_loss': d_loss}
+        output = OrderedDict({
+            'loss': d_loss,
+            'progress_bar': tqdm_dict,
+            'log': tqdm_dict
+        })
+        return output
 
     def configure_optimizers(self):
         lr = self.lr
@@ -181,14 +197,18 @@ class DCGAN(LightningModule):
         return [opt_g, opt_d], []
 
     def train_dataloader(self):
-        transform = transforms.Compose([
-            transforms.Resize((32, 32)),
-            transforms.ToTensor(),
-            transforms.Normalize([0.5], [0.5]),
-        ])
+        def load_latent(z):
+            return torch.load(io.BytesIO(z), map_location='cpu').to(torch.float32)
+        
+        rescale = torch.nn.Tanh()
 
-        dataset = MNIST(os.getcwd(), train=True, download=True, transform=transform)
-        return DataLoader(dataset, batch_size=self.batch_size)
+        dataset = wds.WebDataset('../../data/latents/{000000..000007}.tar')
+        dataset = dataset.rename(image="latent.pt")
+        dataset = dataset.map_dict(image=load_latent)
+        dataset = dataset.map_dict(image=rescale)
+        dataset = dataset.to_tuple("image")
+        dataloader = DataLoader(dataset, batch_size=self.batch_size, num_workers=self.num_workers)
+        return dataloader
 
     def on_epoch_end(self):
         z = self.validation_z.to(self.device)
@@ -196,10 +216,28 @@ class DCGAN(LightningModule):
         # log sampled images
         sample_imgs = self(z)
         grid = torchvision.utils.make_grid(sample_imgs)
-        self.logger.experiment.add_image('generated_images', grid, self.current_epoch)
+
+        self.logger.experiment.log({'generated_images': [wandb.Image(grid, caption='Generated Images')]}, step=self.current_epoch)
 
 
 def main(args: Namespace) -> None:
+    # Wandb logging
+    wandb_logger = WandbLogger(project=args.wandb_project, 
+                               log_model=False, 
+                               save_dir=args.checkpoint_path)
+    wandb_logger.experiment.config.update(args)
+    run_name = wandb_logger.experiment.name
+
+    # Configure the ModelCheckpoint callback
+    checkpoint_callback = ModelCheckpoint(
+        dirpath=os.path.join(args.checkpoint_path, run_name),  # Define the path where checkpoints will be saved
+        save_top_k=-1,  # Set to -1 to save all epochs
+        verbose=True,  # If you want to see a message for each checkpoint
+        monitor='val_loss',  # Quantity to monitor
+        mode='min',  # Mode of the monitored quantity
+        every_n_train_steps=1000000//args.batch_size,
+    )
+
     # ------------------------
     # 1 INIT LIGHTNING MODEL
     # ------------------------
@@ -210,7 +248,8 @@ def main(args: Namespace) -> None:
     # ------------------------
     # If use distubuted training  PyTorch recommends to use DistributedDataParallel.
     # See: https://pytorch.org/docs/stable/nn.html#torch.nn.DataParallel
-    trainer = Trainer(gpus=args.gpus)
+    
+    trainer = Trainer(max_epochs=args.max_epochs, accelerator=args.accelerator, logger=wandb_logger, callbacks=[checkpoint_callback])
 
     # ------------------------
     # 3 START TRAINING
@@ -220,15 +259,21 @@ def main(args: Namespace) -> None:
 
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument("--gpus", type=int, default=0, help="number of GPUs")
-    parser.add_argument("--batch_size", type=int, default=64, help="size of the batches")
+    parser.add_argument("--accelerator", type=str, default="auto", help="auto, dp, ddp, ddp2, ddp_spawn, ddp_cpu, etc.")
+    parser.add_argument("--batch_size", type=int, default=256, help="size of the batches")
     parser.add_argument("--lr", type=float, default=0.0002, help="adam: learning rate")
     parser.add_argument("--b1", type=float, default=0.5,
                         help="adam: decay of first order momentum of gradient")
     parser.add_argument("--b2", type=float, default=0.999,
                         help="adam: decay of first order momentum of gradient")
-    parser.add_argument("--latent_dim", type=int, default=100,
+    parser.add_argument("--latent_dim", type=int, default=256,
                         help="dimensionality of the latent space")
+    parser.add_argument("--wandb_project", type=str, default="dcgan")
+    parser.add_argument("--checkpoint_path", type=str, default="../../models/dcgan/")
+    parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--max_epochs", type=int, default=10, help="number of epochs of training")
+    parser.add_argument("--n_generator_steps_per_discriminator_step", type=int, default=2)
+
 
     hparams = parser.parse_args()
 
