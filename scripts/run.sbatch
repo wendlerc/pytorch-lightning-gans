@@ -16,7 +16,7 @@ LOGS=/fsx/home-wendlerc/models/dcgan
 
 
 export CUDA_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
-python models/dcgan.py --url "pipe:aws s3 cp s3://stability-west/laioco-latents-split-full{/,/aug/001/}{000..500}/{000000..000100}.tar -" \
+srun python models/dcgan.py --url "pipe:aws s3 cp s3://stability-west/laioco-latents-split-full{/,/aug/001/}{000..500}/{000000..000100}.tar -" \
                        --batch_size 2048 \
                        --num_workers 12 \
                        --n_feats 512 \
