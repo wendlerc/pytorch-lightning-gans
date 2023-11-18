@@ -252,7 +252,7 @@ class DCGAN(LightningModule):
             'log': tqdm_dict
         })
 
-        self.log('epoch', self.current_epoch, on_step=True, on_epoch=True)
+        self.log('epoch', float(self.current_epoch), on_step=True, on_epoch=True)
         self.log('loss_D', d_loss.item(), on_step=True, on_epoch=True)
         self.log('loss_G', g_loss.item(), on_step=True, on_epoch=True)
         self.log('D(x)', D_x.mean(), on_step=True, on_epoch=True)
@@ -299,8 +299,8 @@ def main(args: Namespace) -> None:
     # Wandb logging
     wandb_logger = WandbLogger(project=args.wandb_project, 
                                log_model=False, 
-                               save_dir=args.checkpoint_path)
-    wandb_logger.experiment.config.update(args)
+                               save_dir=args.checkpoint_path,
+                               config=vars(args))
     run_name = wandb_logger.experiment.name
 
     # Configure the ModelCheckpoint callback
