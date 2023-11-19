@@ -109,7 +109,7 @@ class Discriminator(nn.Module):
             block = []
             block += 2*[ResidualConvBlock(in_feat, in_feat, kernel_size, padding=1, stride=1)]
             block += [ResidualConvBlock(in_feat, out_feat, kernel_size, padding=1, stride=2)]
-            #block += [nn.Dropout2d(0.25)]
+            block += [nn.Dropout2d(0.1)]
             
             """ small block 
             block = [nn.Conv2d(in_feat, out_feat, 3, 2, 1), nn.LeakyReLU(0.2, inplace=True), nn.Dropout2d(0.25)]
@@ -188,13 +188,14 @@ class DCGAN(LightningModule):
         optG, optD = self.optimizers()
         imgs, = batch
 
-        # sample noise
-        z = torch.randn(imgs.shape[0], self.latent_dim)
-        z = z.type_as(imgs)
+        
 
         # train generator
         for _ in range(self.n_generator_steps_per_discriminator_steps):
             optG.zero_grad()
+            # sample noise
+            z = torch.randn(imgs.shape[0], self.latent_dim)
+            z = z.type_as(imgs)
             # generate images
             self.generated_imgs = self(z)
 
