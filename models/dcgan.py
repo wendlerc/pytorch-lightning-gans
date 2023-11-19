@@ -102,14 +102,14 @@ class Generator(nn.Module):
 
 
 class Discriminator(nn.Module):
-    def __init__(self, img_shape, n_feats=128, kernel_size=3):
+    def __init__(self, img_shape, n_feats=128, kernel_size=3, dropout=0.1):
         super(Discriminator, self).__init__()
 
         def discriminator_block(in_feat, out_feat):
             block = []
             block += 2*[ResidualConvBlock(in_feat, in_feat, kernel_size, padding=1, stride=1)]
             block += [ResidualConvBlock(in_feat, out_feat, kernel_size, padding=1, stride=2)]
-            block += [nn.Dropout2d(0.1)]
+            block += [nn.Dropout2d(dropout)]
             
             """ small block 
             block = [nn.Conv2d(in_feat, out_feat, 3, 2, 1), nn.LeakyReLU(0.2, inplace=True), nn.Dropout2d(0.25)]
@@ -145,6 +145,9 @@ class DCGAN(LightningModule):
                  lr: float = 0.0002,
                  b1: float = 0.5,
                  b2: float = 0.999,
+                 weight_decay_generator: float = 0,
+                 weight_decay_discriminator: float = 0,
+                 dropout: float = 0.1,
                  batch_size: int = 64, 
                  num_workers: int = 0,
                  n_generator_steps_per_discriminator_step: int = 2,
@@ -161,6 +164,9 @@ class DCGAN(LightningModule):
         self.lr = lr
         self.b1 = b1
         self.b2 = b2
+        self.weight_decay_generator = weight_decay_generator
+        self.weight_decay_discriminator = weight_decay_discriminator
+        self.dropout = dropout
         self.batch_size = batch_size
         self.num_workers = num_workers
         self.n_generator_steps_per_discriminator_steps = n_generator_steps_per_discriminator_step
@@ -172,7 +178,7 @@ class DCGAN(LightningModule):
         # networks
         img_shape = (4, 64, 64)
         self.generator = Generator(latent_dim=self.latent_dim, img_shape=img_shape, n_feats=self.n_feats)
-        self.discriminator = Discriminator(img_shape=img_shape, n_feats=self.n_feats)
+        self.discriminator = Discriminator(img_shape=img_shape, n_feats=self.n_feats, dropout=self.dropout)
 
         self.validation_z = torch.randn(8, self.latent_dim)
 
@@ -265,6 +271,8 @@ class DCGAN(LightningModule):
         lr = self.lr
         b1 = self.b1
         b2 = self.b2
+        weight_decay_g = self.weight_decay_generator
+        weight_decay_d = self.weight_decay_discriminator
 
         opt_g = torch.optim.Adam(self.generator.parameters(), lr=lr, betas=(b1, b2))
         opt_d = torch.optim.Adam(self.discriminator.parameters(), lr=lr, betas=(b1, b2))
@@ -361,27 +369,36 @@ def main(args: Namespace) -> None:
 
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument("--accelerator", type=str, default="auto", help="auto, gpu, tpu, mpu, cpu, etc.")
+    # data 
+    parser.add_argument("--url", type=str, default='../../data/latents/{000000..000007}.tar')
     parser.add_argument("--batch_size", type=int, default=256, help="size of the batches")
+    parser.add_argument("--num_workers", type=int, default=0)
+    parser.add_argument("--max_epochs", type=int, default=10, help="number of epochs of training")
+    # model & optimizer
     parser.add_argument("--n_feats", type=int, default=128, help="number of feature maps")
     parser.add_argument("--lr", type=float, default=0.0002, help="adam: learning rate")
     parser.add_argument("--b1", type=float, default=0.5,
                         help="adam: decay of first order momentum of gradient")
     parser.add_argument("--b2", type=float, default=0.999,
                         help="adam: decay of first order momentum of gradient")
+    parser.add_argument("--weight_decay_discriminator", type=float, default=0)
+    parser.add_argument("--weight_decay_generator", type=float, default=0)
     parser.add_argument("--latent_dim", type=int, default=256,
                         help="dimensionality of the latent space")
-    parser.add_argument("--wandb_project", type=str, default="dcgan")
-    parser.add_argument("--checkpoint_path", type=str, default="../../models/dcgan/")
-    parser.add_argument("--num_workers", type=int, default=0)
-    parser.add_argument("--max_epochs", type=int, default=10, help="number of epochs of training")
     parser.add_argument("--n_generator_steps_per_discriminator_step", type=int, default=2)
     parser.add_argument("--discriminator_grad_clipping", type=int, default=5)
+    parser.add_argument("--dropout", type=float, default=0.1)
+    # ligthning trainer
+    parser.add_argument("--checkpoint_path", type=str, default="../../models/dcgan/")
     parser.add_argument("--log_every_n_steps", type=int, default=100)
     parser.add_argument("--checkpoint_every_n_examples", type=int, default=1000000)
-    parser.add_argument("--url", type=str, default='../../data/latents/{000000..000007}.tar')
     parser.add_argument("--devices", type=int, default=None)
     parser.add_argument("--strategy", type=str, default="ddp", help="ddp, ddp2, ddp_spawn, etc.")
+    parser.add_argument("--accelerator", type=str, default="auto", help="auto, gpu, tpu, mpu, cpu, etc.")
+    # logging 
+    parser.add_argument("--wandb_project", type=str, default="dcgan")
+
+
 
 
     hparams = parser.parse_args()
