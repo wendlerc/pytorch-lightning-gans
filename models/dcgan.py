@@ -17,6 +17,8 @@ import torchvision
 import torchvision.transforms as transforms
 from torch.utils.data import DataLoader
 from torchvision.datasets import MNIST
+from torch.utils.data.distributed import DistributedSampler
+
 import webdataset as wds
 
 from pytorch_lightning.core import LightningModule
@@ -24,6 +26,7 @@ from pytorch_lightning.trainer import Trainer
 from pytorch_lightning.loggers import WandbLogger
 from pytorch_lightning.callbacks import ModelCheckpoint
 
+import logging
 import wandb
 
 
@@ -277,13 +280,31 @@ class DCGAN(LightningModule):
         
         rescale = torch.nn.Tanh()
 
-        dataset = wds.WebDataset(self.url)
-        dataset = dataset.rename(image="latent.pt")
-        dataset = dataset.map_dict(image=load_latent)
-        dataset = dataset.map_dict(image=rescale)
-        dataset = dataset.to_tuple("image")
-        dataloader = DataLoader(dataset, batch_size=self.batch_size, num_workers=self.num_workers)
-        return dataloader
+        def log_and_continue(exn):
+            """Call in an exception handler to ignore any exception, issue a warning, and continue."""
+            logging.warning(f'Handling webdataset error ({repr(exn)}). Ignoring.')
+            return True
+
+        pipeline = [
+            wds.SimpleShardList(self.url),
+            wds.split_by_node,
+            wds.split_by_worker,
+            wds.tarfile_to_samples(handler=log_and_continue),
+            wds.shuffle(bufsize=5000, initial=1000),
+            wds.rename(image="latent.pt"),
+            wds.map_dict(image=load_latent),
+            wds.map_dict(image=rescale),
+            wds.to_tuple("image"),
+            wds.batched(self.batch_size, partial=False),
+        ]
+
+        dataset = wds.DataPipeline(*pipeline)
+
+        loader = wds.WebLoader(
+            dataset, batch_size=None, shuffle=False, num_workers=self.num_workers,
+        )
+        return loader
+
 
     def on_epoch_end(self):
         z = self.validation_z.to(self.device)
@@ -296,23 +317,7 @@ class DCGAN(LightningModule):
 
 
 def main(args: Namespace) -> None:
-    # Wandb logging
-    wandb_logger = WandbLogger(project=args.wandb_project, 
-                               log_model=False, 
-                               save_dir=args.checkpoint_path,
-                               config=vars(args))
-    run_name = wandb_logger.experiment.name
-
-    # Configure the ModelCheckpoint callback
-    checkpoint_callback = ModelCheckpoint(
-        dirpath=os.path.join(args.checkpoint_path, run_name),  # Define the path where checkpoints will be saved
-        save_top_k=-1,  # Set to -1 to save all epochs
-        verbose=True,  # If you want to see a message for each checkpoint
-        monitor='D(x)',  # Quantity to monitor
-        mode='min',  # Mode of the monitored quantity
-        every_n_train_steps=args.checkpoint_every_n_examples//args.batch_size,
-    )
-
+    torch.set_float32_matmul_precision('high')
     # ------------------------
     # 1 INIT LIGHTNING MODEL
     # ------------------------
@@ -324,7 +329,33 @@ def main(args: Namespace) -> None:
     # If use distubuted training  PyTorch recommends to use DistributedDataParallel.
     # See: https://pytorch.org/docs/stable/nn.html#torch.nn.DataParallel
     
-    trainer = Trainer(max_epochs=args.max_epochs, accelerator=args.accelerator, logger=wandb_logger, callbacks=[checkpoint_callback])
+    if args.devices is not None:
+        trainer = Trainer(max_epochs=args.max_epochs, accelerator=args.accelerator, devices=args.devices, 
+                        strategy=args.strategy)
+    else:
+        trainer = Trainer(max_epochs=args.max_epochs, accelerator=args.accelerator, strategy=args.strategy)
+
+    if trainer.is_global_zero:
+        # Wandb logging
+        wandb_logger = WandbLogger(project=args.wandb_project, 
+                                log_model=False, 
+                                save_dir=args.checkpoint_path,
+                                config=vars(args))
+        run_name = wandb_logger.experiment.name
+
+        # Configure the ModelCheckpoint callback
+        checkpoint_callback = ModelCheckpoint(
+            dirpath=os.path.join(args.checkpoint_path, run_name),  # Define the path where checkpoints will be saved
+            save_top_k=-1,  # Set to -1 to save all epochs
+            verbose=True,  # If you want to see a message for each checkpoint
+            monitor='D(x)',  # Quantity to monitor
+            mode='min',  # Mode of the monitored quantity
+            every_n_train_steps=args.checkpoint_every_n_examples//args.batch_size,
+        )
+
+        trainer.callbacks.append(checkpoint_callback)
+        trainer.logger = wandb_logger
+
 
     # ------------------------
     # 3 START TRAINING
@@ -334,7 +365,7 @@ def main(args: Namespace) -> None:
 
 if __name__ == '__main__':
     parser = ArgumentParser()
-    parser.add_argument("--accelerator", type=str, default="auto", help="auto, dp, ddp, ddp2, ddp_spawn, ddp_cpu, etc.")
+    parser.add_argument("--accelerator", type=str, default="auto", help="auto, gpu, tpu, mpu, cpu, etc.")
     parser.add_argument("--batch_size", type=int, default=256, help="size of the batches")
     parser.add_argument("--n_feats", type=int, default=128, help="number of feature maps")
     parser.add_argument("--lr", type=float, default=0.0002, help="adam: learning rate")
@@ -353,6 +384,8 @@ if __name__ == '__main__':
     parser.add_argument("--log_every_n_steps", type=int, default=100)
     parser.add_argument("--checkpoint_every_n_examples", type=int, default=1000000)
     parser.add_argument("--url", type=str, default='../../data/latents/{000000..000007}.tar')
+    parser.add_argument("--devices", type=int, default=None)
+    parser.add_argument("--strategy", type=str, default="ddp", help="ddp, ddp2, ddp_spawn, etc.")
 
 
     hparams = parser.parse_args()
