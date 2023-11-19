@@ -31,15 +31,18 @@ import wandb
 
 
 class ResidualConvBlock(nn.Module):
-    def __init__(self, n_channels, kernel_size=3, padding=1, stride=1, bias=True):
+    def __init__(self, in_channels, out_channels, kernel_size=3, padding=1, stride=1, bias=True):
         super().__init__()
-        self.conv = nn.Conv2d(n_channels, n_channels, kernel_size, padding=padding, stride=stride, bias=bias)
-        self.bn = nn.BatchNorm2d(n_channels)
+        if kernel_size != 3:
+            raise NotImplementedError
+        self.embed = nn.Conv2d(in_channels, out_channels, kernel_size=1, padding=padding-1, stride=stride)
+        self.conv = nn.Conv2d(in_channels, out_channels, kernel_size, padding=padding, stride=stride, bias=bias)
+        self.bn = nn.SyncBatchNorm(out_channels)
         self.relu = nn.LeakyReLU(0.2, inplace=True)
     
     def forward(self, x):
         out = self.relu(self.bn(self.conv(x)))
-        return out + x
+        return out + self.embed(x)
 
 
 class Generator(nn.Module):
@@ -55,28 +58,23 @@ class Generator(nn.Module):
         self.conv_blocks = nn.Sequential(
             nn.BatchNorm2d(n_feats),
             nn.Upsample(scale_factor=2),
-            ResidualConvBlock(n_feats, kernel_size, padding=1, stride=1),
-            ResidualConvBlock(n_feats, kernel_size, padding=1, stride=1),
-            ResidualConvBlock(n_feats, kernel_size, padding=1, stride=1),
-            ResidualConvBlock(n_feats, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats, n_feats, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats, n_feats, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats, n_feats, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats, n_feats, kernel_size, padding=1, stride=1),
             nn.Upsample(scale_factor=2),
-            ResidualConvBlock(n_feats, kernel_size, padding=1, stride=1),
-            ResidualConvBlock(n_feats, kernel_size, padding=1, stride=1),
-            ResidualConvBlock(n_feats, kernel_size, padding=1, stride=1),
-            ResidualConvBlock(n_feats, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats, n_feats, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats, n_feats, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats, n_feats, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats, n_feats, kernel_size, padding=1, stride=1),
             nn.Upsample(scale_factor=2),
-            ResidualConvBlock(n_feats, kernel_size, padding=1, stride=1),
-            ResidualConvBlock(n_feats, kernel_size, padding=1, stride=1),
-            ResidualConvBlock(n_feats, kernel_size, padding=1, stride=1),
-            nn.Conv2d(n_feats, n_feats//2, 3, stride=1, padding=1),
-            nn.BatchNorm2d(n_feats//2, 0.8),
-            nn.LeakyReLU(0.2, inplace=True),
-            ResidualConvBlock(n_feats//2, kernel_size, padding=1, stride=1),
-            ResidualConvBlock(n_feats//2, kernel_size, padding=1, stride=1),
-            ResidualConvBlock(n_feats//2, kernel_size, padding=1, stride=1),
-            nn.Conv2d(n_feats//2, n_feats//2, 3, stride=1, padding=1),
-            nn.BatchNorm2d(n_feats//2, 0.8),
-            nn.LeakyReLU(0.2, inplace=True),
+            ResidualConvBlock(n_feats, n_feats, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats, n_feats, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats, n_feats, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats, n_feats//2, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats//2, n_feats//2, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats//2, n_feats//2, kernel_size, padding=1, stride=1),
+            ResidualConvBlock(n_feats//2, n_feats//2, kernel_size, padding=1, stride=1),
             nn.Conv2d(n_feats//2, img_shape[0], 3, stride=1, padding=1),
             nn.Tanh(),
         )
@@ -109,12 +107,9 @@ class Discriminator(nn.Module):
 
         def discriminator_block(in_feat, out_feat):
             block = []
-            block += 2*[ResidualConvBlock(in_feat, kernel_size, padding=1, stride=1)]
-            block += [nn.Conv2d(in_feat, out_feat, kernel_size, 2, 1), 
-                      nn.LeakyReLU(0.2, inplace=True),  
-                      nn.BatchNorm2d(out_feat, 0.8)]
-            block += [ResidualConvBlock(out_feat, kernel_size, padding=1, stride=1)]
-            block += [nn.Dropout2d(0.25)]
+            block += 2*[ResidualConvBlock(in_feat, in_feat, kernel_size, padding=1, stride=1)]
+            block += [ResidualConvBlock(in_feat, out_feat, kernel_size, padding=1, stride=2)]
+            #block += [nn.Dropout2d(0.25)]
             
             """ small block 
             block = [nn.Conv2d(in_feat, out_feat, 3, 2, 1), nn.LeakyReLU(0.2, inplace=True), nn.Dropout2d(0.25)]
