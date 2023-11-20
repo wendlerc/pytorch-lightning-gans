@@ -152,6 +152,7 @@ class DCGAN(LightningModule):
                  num_workers: int = 0,
                  n_generator_steps_per_discriminator_step: int = 2,
                  discriminator_grad_clipping: int = 5,
+                 generator_grad_clipping: int = 5,
                  log_every_n_steps: int = 100,
                  url: str = None,
                  **kwargs):
@@ -171,6 +172,7 @@ class DCGAN(LightningModule):
         self.num_workers = num_workers
         self.n_generator_steps_per_discriminator_steps = n_generator_steps_per_discriminator_step
         self.discriminator_grad_clipping = discriminator_grad_clipping
+        self.generator_grad_clipping = generator_grad_clipping
         self.log_every_n_steps = log_every_n_steps
 
         self.automatic_optimization = False
@@ -219,6 +221,8 @@ class DCGAN(LightningModule):
             D_G_z1 = self.discriminator(self.generated_imgs)
             g_loss = self.adversarial_loss(D_G_z1, valid)
             g_loss.backward()
+            if self.generator_grad_clipping > 0:
+                torch.nn.utils.clip_grad_norm_(self.generator.parameters(), self.generator_grad_clipping)
             optG.step()
             tqdm_dict = {'g_loss': g_loss}
             output = OrderedDict({
@@ -274,8 +278,8 @@ class DCGAN(LightningModule):
         weight_decay_g = self.weight_decay_generator
         weight_decay_d = self.weight_decay_discriminator
 
-        opt_g = torch.optim.Adam(self.generator.parameters(), lr=lr, betas=(b1, b2))
-        opt_d = torch.optim.Adam(self.discriminator.parameters(), lr=lr, betas=(b1, b2))
+        opt_g = torch.optim.Adam(self.generator.parameters(), lr=lr, betas=(b1, b2), weight_decay=weight_decay_g)
+        opt_d = torch.optim.Adam(self.discriminator.parameters(), lr=lr, betas=(b1, b2), weight_decay=weight_decay_d)
         return [opt_g, opt_d], []
 
     def train_dataloader(self):
@@ -354,7 +358,7 @@ def main(args: Namespace) -> None:
             verbose=True,  # If you want to see a message for each checkpoint
             monitor='D(x)',  # Quantity to monitor
             mode='min',  # Mode of the monitored quantity
-            every_n_train_steps=args.checkpoint_every_n_examples//args.batch_size,
+            every_n_train_steps=args.checkpoint_every_n_examples//(args.batch_size * trainer.world_size),
         )
 
         trainer.callbacks.append(checkpoint_callback)
@@ -387,6 +391,7 @@ if __name__ == '__main__':
                         help="dimensionality of the latent space")
     parser.add_argument("--n_generator_steps_per_discriminator_step", type=int, default=2)
     parser.add_argument("--discriminator_grad_clipping", type=int, default=5)
+    parser.add_argument("--generator_grad_clipping", type=int, default=-1)
     parser.add_argument("--dropout", type=float, default=0.1)
     # ligthning trainer
     parser.add_argument("--checkpoint_path", type=str, default="../../models/dcgan/")
