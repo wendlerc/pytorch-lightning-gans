@@ -303,11 +303,16 @@ class DCGAN(LightningModule):
             logging.warning(f'Handling webdataset error ({repr(exn)}). Ignoring.')
             return True
 
+        def filter_no_latent(sample):
+            return 'latent.pt' in sample
+
+
         pipeline = [
             wds.SimpleShardList(self.url),
             wds.split_by_node,
             wds.split_by_worker,
             wds.tarfile_to_samples(handler=log_and_continue),
+            wds.select(filter_no_latent),
             wds.shuffle(bufsize=5000, initial=1000),
             wds.rename(image="latent.pt"),
             wds.map_dict(image=load_latent),
