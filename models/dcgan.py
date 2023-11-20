@@ -46,7 +46,7 @@ class ResidualConvBlock(nn.Module):
 
 
 class Generator(nn.Module):
-    def __init__(self, latent_dim, img_shape, n_feats=128, kernel_size=3):
+    def __init__(self, latent_dim, img_shape, n_feats=128, kernel_size=3, no_tanh=False):
         super().__init__()
         self.img_shape = img_shape
 
@@ -55,7 +55,7 @@ class Generator(nn.Module):
 
         self.n_feats = n_feats
         # medium:
-        self.conv_blocks = nn.Sequential(
+        layers = [
             nn.BatchNorm2d(n_feats),
             nn.Upsample(scale_factor=2),
             ResidualConvBlock(n_feats, n_feats, kernel_size, padding=1, stride=1),
@@ -76,7 +76,12 @@ class Generator(nn.Module):
             ResidualConvBlock(n_feats//2, n_feats//2, kernel_size, padding=1, stride=1),
             ResidualConvBlock(n_feats//2, n_feats//2, kernel_size, padding=1, stride=1),
             nn.Conv2d(n_feats//2, img_shape[0], 3, stride=1, padding=1),
-            nn.Tanh(),
+        ]
+        if not no_tanh:
+            layers.append(nn.Tanh())
+
+        self.conv_blocks = nn.Sequential(
+            *layers
         )
         # small:
         """
@@ -155,6 +160,7 @@ class DCGAN(LightningModule):
                  generator_grad_clipping: int = 5,
                  log_every_n_steps: int = 100,
                  url: str = None,
+                 no_tanh: bool = False,
                  **kwargs):
         super().__init__()
         self.save_hyperparameters()
@@ -174,12 +180,13 @@ class DCGAN(LightningModule):
         self.discriminator_grad_clipping = discriminator_grad_clipping
         self.generator_grad_clipping = generator_grad_clipping
         self.log_every_n_steps = log_every_n_steps
+        self.no_tanh = no_tanh
 
         self.automatic_optimization = False
 
         # networks
         img_shape = (4, 64, 64)
-        self.generator = Generator(latent_dim=self.latent_dim, img_shape=img_shape, n_feats=self.n_feats)
+        self.generator = Generator(latent_dim=self.latent_dim, img_shape=img_shape, n_feats=self.n_feats, no_tanh=self.no_tanh)
         self.discriminator = Discriminator(img_shape=img_shape, n_feats=self.n_feats, dropout=self.dropout)
 
         self.validation_z = torch.randn(8, self.latent_dim)
@@ -286,7 +293,10 @@ class DCGAN(LightningModule):
         def load_latent(z):
             return torch.load(io.BytesIO(z), map_location='cpu').to(torch.float32)
         
-        rescale = torch.nn.Tanh()
+        if self.no_tanh:
+            rescale = torch.nn.Identity()
+        else:
+            rescale = torch.nn.Tanh()
 
         def log_and_continue(exn):
             """Call in an exception handler to ignore any exception, issue a warning, and continue."""
@@ -378,6 +388,7 @@ if __name__ == '__main__':
     parser.add_argument("--batch_size", type=int, default=256, help="size of the batches")
     parser.add_argument("--num_workers", type=int, default=0)
     parser.add_argument("--max_epochs", type=int, default=10, help="number of epochs of training")
+    parser.add_argument("--no_tanh", action='store_true', help="don't use tanh in the generator")
     # model & optimizer
     parser.add_argument("--n_feats", type=int, default=128, help="number of feature maps")
     parser.add_argument("--lr", type=float, default=0.0002, help="adam: learning rate")
